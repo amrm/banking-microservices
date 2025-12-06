@@ -1,0 +1,751 @@
+# Complete Database Setup Guide
+
+## 📦 Required Database Installations
+
+### 1. PostgreSQL 16
+**Purpose:** Main relational database for all microservices
+
+**Installation:**
+
+**Windows:**
+```bash
+# Download installer from: https://www.postgresql.org/download/windows/
+# Or use Chocolatey:
+choco install postgresql
+```
+
+**macOS:**
+```bash
+brew install postgresql@16
+brew services start postgresql@16
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install postgresql-16 postgresql-contrib
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+```
+
+**Docker (Recommended):**
+```bash
+docker run --name banking-postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_USER=postgres \
+  -p 5432:5432 \
+  -d postgres:16-alpine
+```
+
+---
+
+### 2. Neo4j 5.14 (Community Edition)
+**Purpose:** Graph database for relationship analysis and fraud detection
+
+**Installation:**
+
+**Windows:**
+```bash
+# Download from: https://neo4j.com/download/
+# Or use Chocolatey:
+choco install neo4j-community
+```
+
+**macOS:**
+```bash
+brew install neo4j
+neo4j start
+```
+
+**Linux:**
+```bash
+wget -O - https://debian.neo4j.com/neotechnology.gpg.key | sudo apt-key add -
+echo 'deb https://debian.neo4j.com stable latest' | sudo tee /etc/apt/sources.list.d/neo4j.list
+sudo apt update
+sudo apt install neo4j
+sudo systemctl start neo4j
+```
+
+**Docker (Recommended):**
+```bash
+docker run --name banking-neo4j \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/password \
+  -e NEO4J_PLUGINS='["apoc"]' \
+  -d neo4j:5.14-community
+```
+
+---
+
+### 3. Elasticsearch 8.11 (Optional - for logging)
+**Purpose:** Centralized logging and search
+
+**Docker:**
+```bash
+docker run --name banking-elasticsearch \
+  -p 9200:9200 -p 9300:9300 \
+  -e "discovery.type=single-node" \
+  -e "xpack.security.enabled=false" \
+  -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" \
+  -d docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+```
+
+---
+
+### 4. Zipkin (Optional - for distributed tracing)
+**Purpose:** Distributed tracing
+
+**Docker:**
+```bash
+docker run --name banking-zipkin \
+  -p 9411:9411 \
+  -d openzipkin/zipkin
+```
+
+---
+
+## 🗄️ Complete PostgreSQL Database Scripts
+
+### Master Init Script (init-postgres.sql)
+
+```sql
+-- ============================================
+-- Banking Transfer System - Database Setup
+-- PostgreSQL 16
+-- ============================================
+
+-- Drop databases if they exist (CAUTION: This deletes all data!)
+DROP DATABASE IF EXISTS userdb;
+DROP DATABASE IF EXISTS accountdb;
+DROP DATABASE IF EXISTS transferdb;
+DROP DATABASE IF EXISTS limitdb;
+DROP DATABASE IF EXISTS workflowdb;
+DROP DATABASE IF EXISTS corebankingdb;
+
+-- Create databases
+CREATE DATABASE userdb;
+CREATE DATABASE accountdb;
+CREATE DATABASE transferdb;
+CREATE DATABASE limitdb;
+CREATE DATABASE workflowdb;
+CREATE DATABASE corebankingdb;
+
+-- ============================================
+-- USER DATABASE SCHEMA
+-- ============================================
+\c userdb;
+
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Users table
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'LOCKED', 'SUSPENDED')),
+    role VARCHAR(50) DEFAULT 'USER',
+    session_id VARCHAR(50),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for users
+CREATE INDEX idx_users_username ON users(username);
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_status ON users(status);
+CREATE INDEX idx_users_created_at ON users(created_at);
+
+-- Audit logs table
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    entity_type VARCHAR(50) NOT NULL,
+    entity_id VARCHAR(50) NOT NULL,
+    action VARCHAR(50) NOT NULL,
+    user_id VARCHAR(50),
+    session_id VARCHAR(50),
+    request_id VARCHAR(50),
+    tracking_id VARCHAR(50),
+    old_value JSONB,
+    new_value JSONB,
+    ip_address VARCHAR(50),
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for audit logs
+CREATE INDEX idx_audit_logs_entity_type ON audit_logs(entity_type);
+CREATE INDEX idx_audit_logs_entity_id ON audit_logs(entity_id);
+CREATE INDEX idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX idx_audit_logs_timestamp ON audit_logs(timestamp);
+CREATE INDEX idx_audit_logs_session_id ON audit_logs(session_id);
+CREATE INDEX idx_audit_logs_request_id ON audit_logs(request_id);
+
+-- Function to update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Trigger to auto-update updated_at
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- ACCOUNT DATABASE SCHEMA
+-- ============================================
+\c accountdb;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Accounts table
+CREATE TABLE IF NOT EXISTS accounts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL,
+    account_number VARCHAR(20) UNIQUE NOT NULL,
+    account_type VARCHAR(20) NOT NULL CHECK (account_type IN ('CHECKING', 'SAVINGS', 'BUSINESS')),
+    balance DECIMAL(19,2) NOT NULL DEFAULT 0.00 CHECK (balance >= 0),
+    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'CLOSED', 'FROZEN', 'SUSPENDED')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for accounts
+CREATE INDEX idx_accounts_user_id ON accounts(user_id);
+CREATE INDEX idx_accounts_account_number ON accounts(account_number);
+CREATE INDEX idx_accounts_status ON accounts(status);
+CREATE INDEX idx_accounts_created_at ON accounts(created_at);
+
+-- Account balance history (for audit trail)
+CREATE TABLE IF NOT EXISTS account_balance_history (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    account_id UUID NOT NULL REFERENCES accounts(id),
+    old_balance DECIMAL(19,2) NOT NULL,
+    new_balance DECIMAL(19,2) NOT NULL,
+    transaction_type VARCHAR(20) NOT NULL,
+    transaction_reference VARCHAR(100),
+    changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_balance_history_account_id ON account_balance_history(account_id);
+CREATE INDEX idx_balance_history_changed_at ON account_balance_history(changed_at);
+
+-- Trigger function to log balance changes
+CREATE OR REPLACE FUNCTION log_balance_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.balance != NEW.balance THEN
+        INSERT INTO account_balance_history (account_id, old_balance, new_balance, transaction_type)
+        VALUES (NEW.id, OLD.balance, NEW.balance, 'UPDATE');
+    END IF;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER trigger_log_balance_change
+    AFTER UPDATE ON accounts
+    FOR EACH ROW
+    EXECUTE FUNCTION log_balance_change();
+
+-- Auto-update updated_at
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_accounts_updated_at BEFORE UPDATE ON accounts
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- TRANSFER DATABASE SCHEMA
+-- ============================================
+\c transferdb;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Transfers table
+CREATE TABLE IF NOT EXISTS transfers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transfer_reference VARCHAR(50) UNIQUE NOT NULL,
+    user_id UUID NOT NULL,
+    from_account_id UUID NOT NULL,
+    to_account_id UUID NOT NULL,
+    amount DECIMAL(19,2) NOT NULL CHECK (amount > 0),
+    currency VARCHAR(3) NOT NULL,
+    status VARCHAR(30) NOT NULL CHECK (status IN ('INITIATED', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'COMPLETED', 'FAILED')),
+    description VARCHAR(500),
+    workflow_required BOOLEAN NOT NULL DEFAULT FALSE,
+    workflow_id UUID,
+    session_id VARCHAR(50),
+    request_id VARCHAR(50),
+    initiated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+-- Create indexes for transfers
+CREATE INDEX idx_transfers_user_id ON transfers(user_id);
+CREATE INDEX idx_transfers_status ON transfers(status);
+CREATE INDEX idx_transfers_initiated_at ON transfers(initiated_at);
+CREATE INDEX idx_transfers_from_account ON transfers(from_account_id);
+CREATE INDEX idx_transfers_to_account ON transfers(to_account_id);
+CREATE INDEX idx_transfers_reference ON transfers(transfer_reference);
+CREATE INDEX idx_transfers_session_id ON transfers(session_id);
+CREATE INDEX idx_transfers_request_id ON transfers(request_id);
+
+-- Transfer status history
+CREATE TABLE IF NOT EXISTS transfer_status_history (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transfer_id UUID NOT NULL REFERENCES transfers(id),
+    old_status VARCHAR(30),
+    new_status VARCHAR(30) NOT NULL,
+    changed_by VARCHAR(50),
+    changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    comments TEXT
+);
+
+CREATE INDEX idx_status_history_transfer_id ON transfer_status_history(transfer_id);
+CREATE INDEX idx_status_history_changed_at ON transfer_status_history(changed_at);
+
+-- Trigger to log status changes
+CREATE OR REPLACE FUNCTION log_transfer_status_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_OP = 'INSERT') THEN
+        INSERT INTO transfer_status_history (transfer_id, old_status, new_status)
+        VALUES (NEW.id, NULL, NEW.status);
+    ELSIF (OLD.status != NEW.status) THEN
+        INSERT INTO transfer_status_history (transfer_id, old_status, new_status)
+        VALUES (NEW.id, OLD.status, NEW.status);
+    END IF;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER trigger_log_transfer_status
+    AFTER INSERT OR UPDATE ON transfers
+    FOR EACH ROW
+    EXECUTE FUNCTION log_transfer_status_change();
+
+-- ============================================
+-- LIMIT DATABASE SCHEMA
+-- ============================================
+\c limitdb;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Limits table
+CREATE TABLE IF NOT EXISTS limits (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL,
+    limit_type VARCHAR(20) NOT NULL CHECK (limit_type IN ('PER_TRANSACTION', 'DAILY', 'MONTHLY')),
+    max_amount DECIMAL(19,2) NOT NULL CHECK (max_amount > 0),
+    currency VARCHAR(3) NOT NULL,
+    current_utilization DECIMAL(19,2) NOT NULL DEFAULT 0.00 CHECK (current_utilization >= 0),
+    reset_date DATE NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, limit_type)
+);
+
+-- Create indexes for limits
+CREATE INDEX idx_limits_user_id ON limits(user_id);
+CREATE INDEX idx_limits_limit_type ON limits(limit_type);
+CREATE INDEX idx_limits_reset_date ON limits(reset_date);
+
+-- Limit utilization history
+CREATE TABLE IF NOT EXISTS limit_utilization_history (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    limit_id UUID NOT NULL REFERENCES limits(id),
+    amount_utilized DECIMAL(19,2) NOT NULL,
+    transaction_reference VARCHAR(100),
+    utilized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_utilization_history_limit_id ON limit_utilization_history(limit_id);
+CREATE INDEX idx_utilization_history_utilized_at ON limit_utilization_history(utilized_at);
+
+-- Auto-update updated_at
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_limits_updated_at BEFORE UPDATE ON limits
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- WORKFLOW DATABASE SCHEMA
+-- ============================================
+\c workflowdb;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Workflows table
+CREATE TABLE IF NOT EXISTS workflows (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transfer_id UUID NOT NULL,
+    status VARCHAR(20) NOT NULL CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')) DEFAULT 'PENDING',
+    amount DECIMAL(19,2) NOT NULL,
+    description VARCHAR(500),
+    assigned_to VARCHAR(50),
+    approval_rules TEXT,
+    comments VARCHAR(1000),
+    approved_by VARCHAR(50),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMP
+);
+
+-- Create indexes for workflows
+CREATE INDEX idx_workflows_transfer_id ON workflows(transfer_id);
+CREATE INDEX idx_workflows_status ON workflows(status);
+CREATE INDEX idx_workflows_assigned_to ON workflows(assigned_to);
+CREATE INDEX idx_workflows_created_at ON workflows(created_at);
+
+-- Workflow actions log
+CREATE TABLE IF NOT EXISTS workflow_actions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workflow_id UUID NOT NULL REFERENCES workflows(id),
+    action VARCHAR(50) NOT NULL,
+    performed_by VARCHAR(50) NOT NULL,
+    comments TEXT,
+    performed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_workflow_actions_workflow_id ON workflow_actions(workflow_id);
+CREATE INDEX idx_workflow_actions_performed_at ON workflow_actions(performed_at);
+
+-- Auto-update updated_at
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_workflows_updated_at BEFORE UPDATE ON workflows
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- CORE BANKING DATABASE SCHEMA
+-- ============================================
+\c corebankingdb;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Transactions table
+CREATE TABLE IF NOT EXISTS transactions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transfer_id UUID NOT NULL,
+    transaction_type VARCHAR(10) NOT NULL CHECK (transaction_type IN ('DEBIT', 'CREDIT')),
+    account_id UUID NOT NULL,
+    amount DECIMAL(19,2) NOT NULL CHECK (amount > 0),
+    balance_after DECIMAL(19,2) NOT NULL,
+    core_banking_ref VARCHAR(100),
+    posted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for transactions
+CREATE INDEX idx_transactions_transfer_id ON transactions(transfer_id);
+CREATE INDEX idx_transactions_account_id ON transactions(account_id);
+CREATE INDEX idx_transactions_posted_at ON transactions(posted_at);
+CREATE INDEX idx_transactions_core_banking_ref ON transactions(core_banking_ref);
+CREATE INDEX idx_transactions_type ON transactions(transaction_type);
+
+-- Transaction reconciliation table
+CREATE TABLE IF NOT EXISTS transaction_reconciliation (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    transaction_id UUID NOT NULL REFERENCES transactions(id),
+    reconciliation_date DATE NOT NULL,
+    status VARCHAR(20) NOT NULL CHECK (status IN ('PENDING', 'RECONCILED', 'MISMATCH')),
+    reconciled_by VARCHAR(50),
+    notes TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_reconciliation_transaction_id ON transaction_reconciliation(transaction_id);
+CREATE INDEX idx_reconciliation_date ON transaction_reconciliation(reconciliation_date);
+CREATE INDEX idx_reconciliation_status ON transaction_reconciliation(status);
+
+-- ============================================
+-- SAMPLE DATA INSERTION
+-- ============================================
+
+\c userdb;
+
+-- Insert sample users (password: password123)
+INSERT INTO users (id, username, email, password_hash, first_name, last_name, status, role)
+VALUES 
+    ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'john.doe', 'john.doe@bank.com', '$2a$10$xN3wErj0C0fSZQQ5h.MtOeLxKlxBxlLF8JZrOvOPXmgHqFjz7ggRG', 'John', 'Doe', 'ACTIVE', 'USER'),
+    ('b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22', 'jane.smith', 'jane.smith@bank.com', '$2a$10$xN3wErj0C0fSZQQ5h.MtOeLxKlxBxlLF8JZrOvOPXmgHqFjz7ggRG', 'Jane', 'Smith', 'ACTIVE', 'USER'),
+    ('c2ggde77-7e2d-6gh0-dd8f-8dd9df502c33', 'admin', 'admin@bank.com', '$2a$10$xN3wErj0C0fSZQQ5h.MtOeLxKlxBxlLF8JZrOvOPXmgHqFjz7ggRG', 'Admin', 'User', 'ACTIVE', 'ADMIN')
+ON CONFLICT (username) DO NOTHING;
+
+\c accountdb;
+
+-- Insert sample accounts for john.doe
+INSERT INTO accounts (id, user_id, account_number, account_type, balance, currency, status)
+VALUES 
+    ('d3hhef66-6f3e-7hi1-ee9g-9ee0eg613d44', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '1000000001', 'CHECKING', 50000.00, 'USD', 'ACTIVE'),
+    ('e4iifg55-5g4f-8ij2-ff0h-0ff1fh724e55', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '1000000002', 'SAVINGS', 100000.00, 'USD', 'ACTIVE')
+ON CONFLICT (account_number) DO NOTHING;
+
+-- Insert sample accounts for jane.smith
+INSERT INTO accounts (id, user_id, account_number, account_type, balance, currency, status)
+VALUES 
+    ('f5jjgh44-4h5g-9jk3-gg1i-1gg2gi835f66', 'b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22', '1000000003', 'CHECKING', 75000.00, 'USD', 'ACTIVE'),
+    ('g6kkhi33-3i6h-0kl4-hh2j-2hh3hj946g77', 'b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22', '1000000004', 'SAVINGS', 150000.00, 'USD', 'ACTIVE')
+ON CONFLICT (account_number) DO NOTHING;
+
+\c limitdb;
+
+-- Insert limits for john.doe
+INSERT INTO limits (user_id, limit_type, max_amount, currency, current_utilization, reset_date)
+VALUES 
+    ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'PER_TRANSACTION', 5000.00, 'USD', 0.00, CURRENT_DATE + INTERVAL '100 years'),
+    ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'DAILY', 20000.00, 'USD', 0.00, CURRENT_DATE + INTERVAL '1 day'),
+    ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'MONTHLY', 100000.00, 'USD', 0.00, CURRENT_DATE + INTERVAL '1 month')
+ON CONFLICT (user_id, limit_type) DO NOTHING;
+
+-- Insert limits for jane.smith
+INSERT INTO limits (user_id, limit_type, max_amount, currency, current_utilization, reset_date)
+VALUES 
+    ('b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22', 'PER_TRANSACTION', 10000.00, 'USD', 0.00, CURRENT_DATE + INTERVAL '100 years'),
+    ('b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22', 'DAILY', 50000.00, 'USD', 0.00, CURRENT_DATE + INTERVAL '1 day'),
+    ('b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22', 'MONTHLY', 200000.00, 'USD', 0.00, CURRENT_DATE + INTERVAL '1 month')
+ON CONFLICT (user_id, limit_type) DO NOTHING;
+
+-- ============================================
+-- VERIFICATION QUERIES
+-- ============================================
+
+\c userdb;
+SELECT 'Users Created:' as info, COUNT(*) as count FROM users;
+
+\c accountdb;
+SELECT 'Accounts Created:' as info, COUNT(*) as count FROM accounts;
+
+\c limitdb;
+SELECT 'Limits Created:' as info, COUNT(*) as count FROM limits;
+
+-- ============================================
+-- USEFUL VIEWS
+-- ============================================
+
+\c accountdb;
+
+-- View for account summary
+CREATE OR REPLACE VIEW account_summary AS
+SELECT 
+    a.id,
+    a.user_id,
+    a.account_number,
+    a.account_type,
+    a.balance,
+    a.currency,
+    a.status,
+    a.created_at,
+    (SELECT COUNT(*) FROM accountdb.account_balance_history abh WHERE abh.account_id = a.id) as transaction_count
+FROM accounts a;
+
+\c transferdb;
+
+-- View for transfer summary
+CREATE OR REPLACE VIEW transfer_summary AS
+SELECT 
+    t.id,
+    t.transfer_reference,
+    t.user_id,
+    t.from_account_id,
+    t.to_account_id,
+    t.amount,
+    t.currency,
+    t.status,
+    t.workflow_required,
+    t.initiated_at,
+    t.completed_at,
+    EXTRACT(EPOCH FROM (COALESCE(t.completed_at, CURRENT_TIMESTAMP) - t.initiated_at)) as duration_seconds
+FROM transfers t;
+
+-- ============================================
+-- DATABASE SETUP COMPLETE
+-- ============================================
+
+\c postgres;
+SELECT 'Database setup completed successfully!' as status;
+```
+
+---
+
+## 🌐 Neo4j Graph Database Scripts
+
+### Neo4j Init Script (init-neo4j.cypher)
+
+```cypher
+// ============================================
+// Banking Transfer System - Neo4j Setup
+// Neo4j 5.14 Community Edition
+// ============================================
+
+// Drop existing constraints and indexes (if any)
+DROP CONSTRAINT user_id IF EXISTS;
+DROP CONSTRAINT account_id IF EXISTS;
+DROP CONSTRAINT transfer_id IF EXISTS;
+DROP CONSTRAINT workflow_id IF EXISTS;
+
+// Create constraints
+CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.userId IS UNIQUE;
+CREATE CONSTRAINT account_id IF NOT EXISTS FOR (a:Account) REQUIRE a.accountId IS UNIQUE;
+CREATE CONSTRAINT transfer_id IF NOT EXISTS FOR (t:Transfer) REQUIRE t.transferId IS UNIQUE;
+CREATE CONSTRAINT workflow_id IF NOT EXISTS FOR (w:Workflow) REQUIRE w.workflowId IS UNIQUE;
+
+// Create indexes for performance
+CREATE INDEX user_username IF NOT EXISTS FOR (u:User) ON (u.username);
+CREATE INDEX user_email IF NOT EXISTS FOR (u:User) ON (u.email);
+CREATE INDEX account_number IF NOT EXISTS FOR (a:Account) ON (a.accountNumber);
+CREATE INDEX transfer_timestamp IF NOT EXISTS FOR (t:Transfer) ON (t.timestamp);
+CREATE INDEX transfer_status IF NOT EXISTS FOR (t:Transfer) ON (t.status);
+
+// ============================================
+// SAMPLE DATA CREATION
+// ============================================
+
+// Create sample user nodes
+MERGE (u1:User {
+  userId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+  username: 'john.doe',
+  email: 'john.doe@bank.com',
+  createdAt: datetime()
+});
+
+MERGE (u2:User {
+  userId: 'b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22',
+  username: 'jane.smith',
+  email: 'jane.smith@bank.com',
+  createdAt: datetime()
+});
+
+// Create sample account nodes
+MERGE (a1:Account {
+  accountId: 'd3hhef66-6f3e-7hi1-ee9g-9ee0eg613d44',
+  accountNumber: '1000000001',
+  accountType: 'CHECKING',
+  currentBalance: 50000.00
+});
+
+MERGE (a2:Account {
+  accountId: 'e4iifg55-5g4f-8ij2-ff0h-0ff1fh724e55',
+  accountNumber: '1000000002',
+  accountType: 'SAVINGS',
+  currentBalance: 100000.00
+});
+
+MERGE (a3:Account {
+  accountId: 'f5jjgh44-4h5g-9jk3-gg1i-1gg2gi835f66',
+  accountNumber: '1000000003',
+  accountType: 'CHECKING',
+  currentBalance: 75000.00
+});
+
+MERGE (a4:Account {
+  accountId: 'g6kkhi33-3i6h-0kl4-hh2j-2hh3hj946g77',
+  accountNumber: '1000000004',
+  accountType: 'SAVINGS',
+  currentBalance: 150000.00
+});
+
+// Link users to their accounts
+MATCH (u:User {userId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'})
+MATCH (a1:Account {accountNumber: '1000000001'})
+MATCH (a2:Account {accountNumber: '1000000002'})
+MERGE (u)-[:OWNS]->(a1)
+MERGE (u)-[:OWNS]->(a2);
+
+MATCH (u:User {userId: 'b1ffcd88-8d1c-5fg9-cc7e-7cc8ce491b22'})
+MATCH (a3:Account {accountNumber: '1000000003'})
+MATCH (a4:Account {accountNumber: '1000000004'})
+MERGE (u)-[:OWNS]->(a3)
+MERGE (u)-[:OWNS]->(a4);
+
+// ============================================
+// USEFUL CYPHER QUERIES FOR ANALYSIS
+// ============================================
+
+// Query 1: Find all transfers for a user
+// MATCH (u:User {userId: $userId})-[:INITIATED]->(t:Transfer)
+// RETURN t
+// ORDER BY t.timestamp DESC;
+
+// Query 2: Find transaction patterns between accounts
+// MATCH (a1:Account)-[r:TRANSACTED_WITH]->(a2:Account)
+// WHERE r.count > 5
+// RETURN a1.accountNumber, a2.accountNumber, r.count, r.totalAmount
+// ORDER BY r.count DESC;
+
+// Query 3: Find users who transact frequently with each other
+// MATCH (u1:User)-[:OWNS]->(a1:Account)-[r:TRANSACTED_WITH]-(a2:Account)<-[:OWNS]-(u2:User)
+// WHERE r.count > 10
+// RETURN u1.username, u2.username, r.count, r.totalAmount
+// ORDER BY r.count DESC;
+
+// Query 4: Find circular transaction patterns (potential fraud)
+// MATCH path = (a1:Account)-[:TRANSACTED_WITH*3..5]->(a1)
+// WHERE ALL(r IN relationships(path) WHERE r.totalAmount > 10000)
+// RETURN path;
+
+// Query 5: Find accounts with high transaction velocity (last 24 hours)
+// MATCH (a:Account)<-[:TO_ACCOUNT]-(t:Transfer)
+// WHERE t.timestamp > datetime() - duration('P1D')
+// WITH a, count(t) as txCount
+// WHERE txCount > 50
+// RETURN a.accountNumber, txCount
+// ORDER BY txCount DESC;
+
+// Query 6: Find transfer chain (money trail)
+// MATCH path = (a1:Account)-[:TRANSACTED_WITH*1..4]->(a2:Account)
+// WHERE a1.accountNumber = $startAccount
+// RETURN path
+// LIMIT 10;
+
+// Query 7: Find all pending workflow approvals
+// MATCH (w:Workflow {status: 'PENDING'})<-[:REQUIRES_WORKFLOW]-(t:Transfer)
+// RETURN w, t
+// ORDER BY w.createdAt DESC;
+
+// Query 8: Find network of accounts related to a suspicious account
+// MATCH (a:Account {accountNumber: $suspiciousAccount})
+// CALL apoc.path.subgraphNodes(a, {
+//   relationshipFilter: 'TRANSACTED_WITH',
+//   minLevel: 1,
+//   maxLevel: 3
+// })
+// YIELD node
+// RETURN node;
+
+// ============================================
+// GRAPH ANALYTICS PROCEDURES
+// ============================================
+
+// Procedure to detect transaction loops
+// CALL gds.graph.project(
+//   'transactionGraph',
+//   'Account',
+//   'TRANSACTED_WITH'
+// );
+
+// CALL gds.louvain.stream('transactionGraph')
+// YIELD nodeId, communityId
+// RETURN gds.
